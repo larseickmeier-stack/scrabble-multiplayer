@@ -1,0 +1,194 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Scrabble Online</title>
+  <link rel="stylesheet" href="/css/style.css">
+</head>
+<body>
+
+  <!-- ═══ AUTH SCREEN ═══ -->
+  <div id="auth-screen" class="screen active">
+    <div class="auth-container">
+      <div class="auth-box">
+        <h1>SCRABBLE</h1>
+        <p class="subtitle">Online Multiplayer</p>
+        <div id="auth-error" class="error-msg"></div>
+
+        <div id="login-form">
+          <input type="text" id="login-user" placeholder="Benutzername" autocomplete="username">
+          <input type="password" id="login-pass" placeholder="Passwort" autocomplete="current-password">
+          <button class="btn btn-primary" onclick="doLogin()">Anmelden</button>
+          <p class="auth-toggle">Noch kein Konto? <a onclick="showRegister()">Registrieren</a></p>
+        </div>
+
+        <div id="register-form" style="display:none">
+          <input type="text" id="reg-user" placeholder="Benutzername (mind. 3 Zeichen)">
+          <input type="password" id="reg-pass" placeholder="Passwort (mind. 4 Zeichen)">
+          <input type="password" id="reg-pass2" placeholder="Passwort wiederholen">
+          <button class="btn btn-primary" onclick="doRegister()">Registrieren</button>
+          <p class="auth-toggle">Bereits ein Konto? <a onclick="showLogin()">Anmelden</a></p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══ LOBBY SCREEN ═══ -->
+  <div id="lobby-screen" class="screen">
+    <div class="lobby-container">
+      <div class="lobby-header">
+        <h2>SCRABBLE LOBBY</h2>
+        <div class="user-info">
+          <div>
+            <div class="username" id="lobby-username"></div>
+            <div class="stats" id="lobby-stats"></div>
+          </div>
+          <button class="btn btn-secondary btn-small" id="admin-btn" onclick="showScreen('admin-screen')" style="display:none;">Admin</button>
+          <button class="btn btn-secondary btn-small" onclick="doLogout()">Abmelden</button>
+        </div>
+      </div>
+
+      <div class="lobby-actions">
+        <input type="text" id="lobby-name" placeholder="Spielname..." value="">
+        <select id="max-players" style="padding:10px;border-radius:8px;background:rgba(255,255,255,0.05);color:var(--text);border:2px solid #333;">
+          <option value="2">2 Spieler</option>
+          <option value="3">3 Spieler</option>
+          <option value="4">4 Spieler</option>
+        </select>
+        <button class="btn btn-gold" onclick="createLobby()">Spiel erstellen</button>
+      </div>
+
+      <div id="current-lobby" style="display:none;" class="panel">
+        <h3>Dein Spiel</h3>
+        <div id="current-lobby-info"></div>
+        <div style="display:flex;gap:8px;margin-top:12px;">
+          <button class="btn btn-gold btn-small" id="start-btn" onclick="startGame()" style="display:none;">Spiel starten</button>
+          <button class="btn btn-secondary btn-small" onclick="leaveLobby()">Verlassen</button>
+        </div>
+      </div>
+
+      <h3 style="margin:16px 0 8px;color:var(--text2);">Offene Spiele</h3>
+      <div id="lobby-list" class="lobby-list">
+        <div class="no-lobbies">Keine offenen Spiele. Erstelle eines!</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══ ADMIN SCREEN ═══ -->
+  <div id="admin-screen" class="screen">
+    <div class="lobby-container">
+      <div class="lobby-header">
+        <h2>ADMIN-PANEL</h2>
+        <div class="user-info">
+          <button class="btn btn-secondary btn-small" onclick="showScreen('lobby-screen')">Zurück zur Lobby</button>
+        </div>
+      </div>
+
+      <!-- Tab Navigation -->
+      <div class="admin-tabs">
+        <button class="admin-tab active" onclick="switchAdminTab('users')">Benutzer</button>
+        <button class="admin-tab" onclick="switchAdminTab('games')">Laufende Spiele</button>
+      </div>
+
+      <!-- Users Tab -->
+      <div id="admin-tab-users" class="admin-tab-content active">
+        <div class="panel" style="margin-bottom:16px;">
+          <div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;">
+            <input type="text" id="admin-search" placeholder="Benutzer suchen..." oninput="filterAdminUsers()"
+              style="flex:1;padding:8px 12px;border:2px solid #333;border-radius:8px;background:rgba(255,255,255,0.05);color:var(--text);font-size:14px;outline:none;">
+            <span id="admin-user-count" style="color:var(--text2);font-size:13px;"></span>
+          </div>
+        </div>
+        <div id="admin-user-list" class="admin-list"></div>
+      </div>
+
+      <!-- Games Tab -->
+      <div id="admin-tab-games" class="admin-tab-content" style="display:none;">
+        <div id="admin-game-list" class="admin-list"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══ ADMIN PASSWORD RESET MODAL ═══ -->
+  <div id="reset-pw-modal" class="modal-overlay" style="display:none;">
+    <div class="modal">
+      <h3>Passwort zurücksetzen</h3>
+      <p style="color:var(--text2);margin-bottom:12px;" id="reset-pw-user"></p>
+      <input type="password" id="reset-pw-input" placeholder="Neues Passwort (mind. 4 Zeichen)"
+        style="width:100%;padding:10px;margin-bottom:12px;border:2px solid #333;border-radius:8px;background:rgba(255,255,255,0.05);color:var(--text);font-size:14px;outline:none;">
+      <div style="display:flex;gap:8px;justify-content:center;">
+        <button class="btn btn-gold btn-small" onclick="doResetPassword()">Zurücksetzen</button>
+        <button class="btn btn-secondary btn-small" onclick="document.getElementById('reset-pw-modal').style.display='none'">Abbrechen</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══ GAME SCREEN ═══ -->
+  <div id="game-screen" class="screen">
+    <div class="game-container">
+      <div class="board-section">
+        <div class="board" id="board"></div>
+        <div class="rack-section">
+          <div class="rack" id="rack"></div>
+          <div class="game-actions">
+            <button class="btn btn-gold btn-small" onclick="submitMove()">Legen</button>
+            <button class="btn btn-secondary btn-small" onclick="recallTiles()">Zurücknehmen</button>
+            <button class="btn btn-secondary btn-small" onclick="shuffleRack()">Mischen</button>
+            <button class="btn btn-secondary btn-small" onclick="swapTiles()">Tauschen</button>
+            <button class="btn btn-secondary btn-small" onclick="passTurn()">Passen</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="sidebar">
+        <div class="panel">
+          <div class="turn-indicator" id="turn-indicator"></div>
+        </div>
+
+        <div class="panel">
+          <h3>Punkte</h3>
+          <div class="scores-list" id="scores-list"></div>
+        </div>
+
+        <div class="panel">
+          <h3>Beutel</h3>
+          <div class="bag-info">
+            <span class="count" id="bag-count">0</span>
+            <span>Steine übrig</span>
+          </div>
+        </div>
+
+        <div class="panel">
+          <h3>Verlauf</h3>
+          <div class="history-list" id="history-list"></div>
+        </div>
+
+        <div class="panel">
+          <button class="btn btn-secondary btn-small" style="width:100%;" onclick="backToLobby()">Zurück zur Lobby</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══ BLANK TILE MODAL ═══ -->
+  <div id="blank-modal" class="modal-overlay" style="display:none;">
+    <div class="modal">
+      <h3>Buchstabe für Blankostein wählen</h3>
+      <div class="letter-grid" id="letter-grid"></div>
+    </div>
+  </div>
+
+  <!-- ═══ GAME OVER OVERLAY ═══ -->
+  <div id="game-over" class="game-over-overlay" style="display:none;">
+    <div class="game-over-box">
+      <h2 id="winner-text"></h2>
+      <div class="final-scores" id="final-scores"></div>
+      <button class="btn btn-gold" onclick="backToLobby()">Zurück zur Lobby</button>
+    </div>
+  </div>
+
+  <script src="/socket.io/socket.io.js"></script>
+  <script src="/js/app.js"></script>
+</body>
+</html>
