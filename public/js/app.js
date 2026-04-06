@@ -11,6 +11,9 @@ let placedTiles = []; // { row, col, tile, element }
 let swapMode = false;
 let swapSelection = new Set();
 
+// Preview state
+let previewTimer = null;
+
 // Premium square labels
 const PREMIUM_LABELS = {
   'TW': '3×W', 'DW': '2×W', 'TL': '3×B', 'DL': '2×B', 'CE': '★'
@@ -138,6 +141,18 @@ function connectSocket() {
     document.getElementById('admin-btn').style.display = (currentUserRole === 'admin') ? 'inline-block' : 'none';
     showScreen('lobby-screen');
     socket.emit('get_lobbies');
+
+    // Check for active game rejoin
+    socket.emit('check_active_game');
+  });
+
+  socket.on('game_rejoin', (state) => {
+    currentGameId = state.id;
+    gameState = state;
+    placedTiles = [];
+    selectedTile = null;
+    showScreen('game-screen');
+    renderGame();
   });
 
   socket.on('kicked', (msg) => {
@@ -151,7 +166,10 @@ function connectSocket() {
     showAuthError('Sitzung abgelaufen. Bitte erneut anmelden.');
   });
 
-  socket.on('lobbies_update', renderLobbies);
+  socket.on('lobbies_update', (lobbies) => {
+    renderLobbies(lobbies);
+    checkActiveGameButton();
+  });
 
   socket.on('lobby_joined', (lobby) => {
     currentLobbyId = lobby.id;
@@ -181,6 +199,24 @@ function connectSocket() {
     }
   });
 
+  socket.on('preview_result', (result) => {
+    document.querySelectorAll('.valid-word').forEach(el => el.classList.remove('valid-word'));
+    if (result.valid && result.words && result.words.length > 0) {
+      for (const w of result.words) {
+        for (const t of w.tiles) {
+          const cell = document.querySelector(`.cell[data-row="${t.row}"][data-col="${t.col}"]`);
+          if (cell) cell.classList.add('valid-word');
+        }
+      }
+      // Show score preview
+      const preview = document.getElementById('score-preview');
+      preview.textContent = `+${result.totalScore} Punkte`;
+      preview.style.display = 'block';
+    } else {
+      document.getElementById('score-preview').style.display = 'none';
+    }
+  });
+
   socket.on('move_rejected', (msg) => {
     alert('Zug abgelehnt: ' + msg);
   });
@@ -190,7 +226,33 @@ function connectSocket() {
   });
 }
 
+// ═══ Preview Logic ═══
+function triggerPreview() {
+  clearTimeout(previewTimer);
+  // Remove old highlights
+  document.querySelectorAll('.valid-word').forEach(el => el.classList.remove('valid-word'));
+  document.getElementById('score-preview').style.display = 'none';
+
+  if (placedTiles.length === 0 || !gameState?.isMyTurn) return;
+
+  previewTimer = setTimeout(() => {
+    const placements = placedTiles.map(p => ({
+      row: p.row, col: p.col,
+      letter: p.tile.letter, points: p.tile.points,
+      tileId: p.tile.id, chosenLetter: p.tile.chosenLetter || null
+    }));
+    socket.emit('preview_move', { gameId: currentGameId, placements });
+  }, 600);
+}
+
 // ═══ Lobby ═══
+function checkActiveGameButton() {
+  const banner = document.getElementById('rejoin-banner');
+  if (banner) {
+    banner.style.display = currentGameId ? 'flex' : 'none';
+  }
+}
+
 function renderLobbies(lobbies) {
   const list = document.getElementById('lobby-list');
   const filtered = lobbies.filter(l => l.id !== currentLobbyId);
@@ -255,6 +317,13 @@ function startGame() {
   if (currentLobbyId) socket.emit('start_game', currentLobbyId);
 }
 
+function rejoinGame() {
+  if (currentGameId) {
+    socket.emit('rejoin_game', currentGameId);
+  }
+}
+function rejoinActiveGame() { rejoinGame(); }
+
 // ═══ Game Rendering ═══
 function renderGame() {
   renderBoard();
@@ -288,6 +357,17 @@ function renderBoard() {
         const letter = placed.tile.chosenLetter || placed.tile.letter;
         cell.innerHTML = `${letter}<span class="points">${placed.tile.points}</span>`;
         cell.onclick = () => recallSingleTile(r, c);
+
+        // Make placed tiles draggable
+        cell.draggable = true;
+        cell.addEventListener('dragstart', (e) => {
+          e.dataTransfer.effectAllowed = 'move';
+          e.dataTransfer.setData('text/plain', JSON.stringify({ source: 'board', row: r, col: c }));
+          cell.classList.add('dragging');
+        });
+        cell.addEventListener('dragend', () => {
+          cell.classList.remove('dragging');
+        });
       } else {
         const premium = PREMIUM_MAP[`${r},${c}`];
         if (premium) {
@@ -296,6 +376,56 @@ function renderBoard() {
         }
         cell.onclick = () => placeTileOnBoard(r, c);
       }
+
+      // Drop target for empty cells and preview cells
+      cell.addEventListener('dragover', (e) => {
+        e.preventDefault();
+        e.dataTransfer.dropEffect = 'move';
+        cell.classList.add('drop-target');
+      });
+      cell.addEventListener('dragleave', () => {
+        cell.classList.remove('drop-target');
+      });
+      cell.addEventListener('drop', (e) => {
+        e.preventDefault();
+        cell.classList.remove('drop-target');
+
+        if (!gameState.isMyTurn) return;
+
+        try {
+          const data = JSON.parse(e.dataTransfer.getData('text/plain'));
+
+          if (data.source === 'rack') {
+            // Dragging from rack to board
+            const tile = gameState.hand.find(t => t.id === data.tileId);
+            if (!tile) return;
+
+            if (tile.letter === '*') {
+              showBlankModal((chosenLetter) => {
+                const tileWithLetter = { ...tile, chosenLetter: chosenLetter.toUpperCase() };
+                placedTiles.push({ row: r, col: c, tile: tileWithLetter });
+                renderGame();
+                triggerPreview();
+              });
+            } else {
+              placedTiles.push({ row: r, col: c, tile: tile });
+              renderGame();
+              triggerPreview();
+            }
+          } else if (data.source === 'board') {
+            // Dragging from board cell to another board cell
+            const oldPlaced = placedTiles.find(p => p.row === data.row && p.col === data.col);
+            if (!oldPlaced) return;
+
+            placedTiles = placedTiles.filter(p => !(p.row === data.row && p.col === data.col));
+            placedTiles.push({ row: r, col: c, tile: oldPlaced.tile });
+            renderGame();
+            triggerPreview();
+          }
+        } catch (err) {
+          console.error('Drop error:', err);
+        }
+      });
 
       boardEl.appendChild(cell);
     }
@@ -319,6 +449,18 @@ function renderRack() {
 
     el.innerHTML = `${tile.letter === '*' ? '?' : tile.letter}<span class="tile-points">${tile.points}</span>`;
 
+    // Drag and drop
+    el.draggable = true;
+    el.addEventListener('dragstart', (e) => {
+      e.dataTransfer.effectAllowed = 'move';
+      e.dataTransfer.setData('text/plain', JSON.stringify({ source: 'rack', tileId: tile.id }));
+      el.classList.add('dragging');
+    });
+    el.addEventListener('dragend', () => {
+      el.classList.remove('dragging');
+    });
+
+    // Click selection (fallback)
     el.onclick = () => {
       if (swapMode) {
         if (swapSelection.has(tile.id)) swapSelection.delete(tile.id);
@@ -336,6 +478,37 @@ function renderRack() {
 
     rackEl.appendChild(el);
   });
+
+  // Make rack a drop target (only attach once via flag)
+  if (!rackEl._dropSetup) {
+    rackEl._dropSetup = true;
+    rackEl.addEventListener('dragover', (e) => {
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'move';
+      rackEl.classList.add('drop-target');
+    });
+    rackEl.addEventListener('dragleave', () => {
+      rackEl.classList.remove('drop-target');
+    });
+    rackEl.addEventListener('drop', (e) => {
+      e.preventDefault();
+      rackEl.classList.remove('drop-target');
+
+      if (!gameState.isMyTurn) return;
+
+      try {
+        const data = JSON.parse(e.dataTransfer.getData('text/plain'));
+
+        if (data.source === 'board') {
+          placedTiles = placedTiles.filter(p => !(p.row === data.row && p.col === data.col));
+          renderGame();
+          triggerPreview();
+        }
+      } catch (err) {
+        console.error('Drop error:', err);
+      }
+    });
+  }
 }
 
 function renderScores() {
@@ -355,6 +528,9 @@ function renderBagCount() {
 function renderHistory() {
   const el = document.getElementById('history-list');
   el.innerHTML = gameState.moveHistory.slice().reverse().map(m => {
+    if (m.action === 'left') {
+      return `<div class="history-item"><span class="player-name">${escHtml(m.player)}</span> hat das Spiel verlassen</div>`;
+    }
     if (m.action === 'pass') {
       return `<div class="history-item"><span class="player-name">${escHtml(m.player)}</span> hat gepasst</div>`;
     }
@@ -391,6 +567,7 @@ function placeTileOnBoard(row, col) {
       placedTiles.push({ row, col, tile: tileWithLetter });
       selectedTile = null;
       renderGame();
+      triggerPreview();
     });
     return;
   }
@@ -398,17 +575,20 @@ function placeTileOnBoard(row, col) {
   placedTiles.push({ row, col, tile: selectedTile });
   selectedTile = null;
   renderGame();
+  triggerPreview();
 }
 
 function recallSingleTile(row, col) {
   placedTiles = placedTiles.filter(p => !(p.row === row && p.col === col));
   renderGame();
+  triggerPreview();
 }
 
 function recallTiles() {
   placedTiles = [];
   selectedTile = null;
   renderGame();
+  triggerPreview();
 }
 
 function shuffleRack() {
@@ -503,13 +683,31 @@ function showGameOver() {
   `).join('');
 }
 
-function backToLobby() {
-  document.getElementById('game-over').style.display = 'none';
+function leaveGame() {
+  if (!currentGameId) return;
+  if (!confirm('Möchtest du das Spiel wirklich verlassen? Du kannst nicht zurückkehren.')) return;
+
+  socket.emit('leave_game', currentGameId);
   currentGameId = null;
   gameState = null;
   placedTiles = [];
+  document.getElementById('game-over').style.display = 'none';
   showScreen('lobby-screen');
   socket.emit('get_lobbies');
+  checkActiveGameButton();
+}
+
+function backToLobby() {
+  document.getElementById('game-over').style.display = 'none';
+  // Only clear game ID if game is over
+  if (gameState && gameState.gameOver) {
+    currentGameId = null;
+    gameState = null;
+  }
+  placedTiles = [];
+  showScreen('lobby-screen');
+  socket.emit('get_lobbies');
+  checkActiveGameButton();
 }
 
 // ═══ Utils ═══

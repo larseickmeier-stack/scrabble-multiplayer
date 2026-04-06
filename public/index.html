@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Scrabble Online</title>
-  <link rel="stylesheet" href="/css/style.css">
+  <link rel="stylesheet" href="/css/style.css?v=4">
 </head>
 <body>
 
@@ -57,6 +57,11 @@
           <option value="4">4 Spieler</option>
         </select>
         <button class="btn btn-gold" onclick="createLobby()">Spiel erstellen</button>
+      </div>
+
+      <div id="rejoin-banner" class="rejoin-banner" style="display:none;">
+        <span>Du hast ein laufendes Spiel!</span>
+        <button class="btn btn-gold btn-small" onclick="rejoinGame()">Zum Spiel</button>
       </div>
 
       <div id="current-lobby" style="display:none;" class="panel">
@@ -131,6 +136,7 @@
         <div class="board" id="board"></div>
         <div class="rack-section">
           <div class="rack" id="rack"></div>
+          <div class="score-preview" id="score-preview"></div>
           <div class="game-actions">
             <button class="btn btn-gold btn-small" onclick="submitMove()">Legen</button>
             <button class="btn btn-secondary btn-small" onclick="recallTiles()">Zurücknehmen</button>
@@ -166,6 +172,7 @@
 
         <div class="panel">
           <button class="btn btn-secondary btn-small" style="width:100%;" onclick="backToLobby()">Zurück zur Lobby</button>
+          <button class="btn btn-secondary btn-small" style="width:100%;margin-top:8px;color:#ff5252;" onclick="leaveGame()">Spiel verlassen</button>
         </div>
       </div>
     </div>
@@ -189,6 +196,6 @@
   </div>
 
   <script src="/socket.io/socket.io.js"></script>
-  <script src="/js/app.js"></script>
+  <script src="/js/app.js?v=4"></script>
 </body>
 </html>

@@ -142,7 +142,7 @@ function getFormedWords(board, placements) {
   // Temporarily place tiles
   const tempBoard = board.map(row => [...row]);
   for (const p of placements) {
-    tempBoard[p.row][p.col] = { letter: p.letter, points: p.points, isNew: true };
+    tempBoard[p.row][p.col] = { letter: p.letter, points: p.points, isNew: true, chosenLetter: p.chosenLetter || null };
   }
 
   const words = [];

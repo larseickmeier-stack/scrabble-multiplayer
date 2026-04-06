@@ -1,5 +1,6 @@
 const express = require('express');
 const http = require('http');
+const https = require('https');
 const { Server } = require('socket.io');
 const bcrypt = require('bcryptjs');
 const { v4: uuidv4 } = require('uuid');
@@ -8,7 +9,7 @@ const path = require('path');
 
 const { createTileBag, getLetterPoints } = require('./game/tiles');
 const { createBoard, isValidPlacement, getFormedWords, calculateScore, BOARD_SIZE, getPremiumType } = require('./game/board');
-const { validateWords } = require('./game/validator');
+const { validateWords, validateWord } = require('./game/validator');
 
 const app = express();
 const server = http.createServer(app);
@@ -17,8 +18,14 @@ const io = new Server(server);
 app.use(express.static('public'));
 app.use(express.json());
 
+// ─── GitHub Configuration ───
+const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
+const GITHUB_REPO = process.env.GITHUB_REPO || 'larseickmeier-stack/scrabble-multiplayer';
+const GITHUB_API_URL = 'https://api.github.com';
+
 // ─── User Store ───
 const USERS_FILE = path.join(__dirname, 'users.json');
+let userFileSha = null; // Track GitHub file SHA for updates
 
 function loadUsers() {
   try {
@@ -31,7 +38,103 @@ function loadUsers() {
 
 function saveUsers(users) {
   fs.writeFileSync(USERS_FILE, JSON.stringify(users, null, 2));
+
+  // Async push to GitHub if token is available
+  if (GITHUB_TOKEN) {
+    pushUsersToGitHub(users).catch(err => {
+      console.error('Failed to sync users to GitHub:', err.message);
+    });
+  }
 }
+
+// ─── GitHub API Functions ───
+function makeGitHubRequest(method, endpoint, body = null) {
+  return new Promise((resolve, reject) => {
+    const url = new URL(`${GITHUB_API_URL}${endpoint}`);
+    const options = {
+      hostname: url.hostname,
+      path: url.pathname + url.search,
+      method,
+      headers: {
+        'Accept': 'application/vnd.github.v3+json',
+        'User-Agent': 'Scrabble-Server',
+        'Authorization': `token ${GITHUB_TOKEN}`
+      }
+    };
+
+    const req = https.request(options, (res) => {
+      let data = '';
+      res.on('data', chunk => data += chunk);
+      res.on('end', () => {
+        try {
+          const parsed = JSON.parse(data);
+          resolve({ status: res.statusCode, data: parsed });
+        } catch {
+          resolve({ status: res.statusCode, data });
+        }
+      });
+    });
+
+    req.on('error', reject);
+    if (body) req.write(JSON.stringify(body));
+    req.end();
+  });
+}
+
+async function loadUsersFromGitHub() {
+  try {
+    if (!GITHUB_TOKEN) return null;
+
+    const response = await makeGitHubRequest(
+      'GET',
+      `/repos/${GITHUB_REPO}/contents/data/users.json`
+    );
+
+    if (response.status === 200 && response.data.content) {
+      userFileSha = response.data.sha;
+      const content = Buffer.from(response.data.content, 'base64').toString('utf8');
+      return JSON.parse(content);
+    }
+  } catch (err) {
+    console.error('Failed to load users from GitHub:', err.message);
+  }
+  return null;
+}
+
+async function pushUsersToGitHub(users) {
+  try {
+    if (!GITHUB_TOKEN) return;
+
+    const content = Buffer.from(JSON.stringify(users, null, 2)).toString('base64');
+    const body = {
+      message: `Update users.json - ${new Date().toISOString()}`,
+      content,
+      sha: userFileSha
+    };
+
+    const response = await makeGitHubRequest(
+      'PUT',
+      `/repos/${GITHUB_REPO}/contents/data/users.json`,
+      body
+    );
+
+    if (response.status === 200 || response.status === 201) {
+      userFileSha = response.data.content?.sha;
+    }
+  } catch (err) {
+    console.error('Failed to push users to GitHub:', err.message);
+  }
+}
+
+// ─── Server Startup: Load Users ───
+async function initializeUsers() {
+  const gitHubUsers = await loadUsersFromGitHub();
+  if (gitHubUsers) {
+    fs.writeFileSync(USERS_FILE, JSON.stringify(gitHubUsers, null, 2));
+  }
+}
+
+initializeUsers();
 
 // ─── Auth Routes ───
 app.post('/api/register', async (req, res) => {
@@ -243,6 +346,7 @@ const sessions = {}; // token -> username
 const games = {};    // gameId -> gameState
 const lobbies = {};  // gameId -> lobby info
 const playerSockets = {}; // username -> socket
+const playerGames = {}; // username -> gameId (for rejoin capability)
 
 function createGame(gameId, players) {
   const bag = createTileBag();
@@ -283,6 +387,15 @@ io.on('connection', (socket) => {
       }
       playerSockets[currentUser] = socket;
       socket.emit('authenticated', { username: currentUser, role: user?.role || 'user' });
+
+      // Check if user has an active game to rejoin
+      const activeGameId = playerGames[currentUser];
+      if (activeGameId && games[activeGameId] && !games[activeGameId].gameOver) {
+        const game = games[activeGameId];
+        socket.join(`game_${activeGameId}`);
+        socket.emit('game_rejoin', getPlayerView(game, currentUser));
+      }
+
       broadcastLobbies();
     } else {
       socket.emit('auth_error', 'Ungültiges Token.');
@@ -346,6 +459,11 @@ io.on('connection', (socket) => {
 
     const game = createGame(gameId, lobby.players);
     games[gameId] = game;
+
+    // Register all players in playerGames map
+    for (const p of lobby.players) {
+      playerGames[p] = gameId;
+    }
 
     // Notify all players
     for (const p of lobby.players) {
@@ -495,6 +613,171 @@ io.on('connection', (socket) => {
     broadcastGameState(game);
   });
 
+  // ─── Preview Move Validation (New) ───
+  socket.on('preview_move', async (data) => {
+    if (!currentUser) return;
+    const { gameId, placements } = data;
+    const game = games[gameId];
+
+    if (!game || game.gameOver) {
+      return socket.emit('preview_result', {
+        valid: false,
+        error: 'Spiel nicht aktiv.'
+      });
+    }
+
+    if (game.players[game.currentPlayerIndex] !== currentUser) {
+      return socket.emit('preview_result', {
+        valid: false,
+        error: 'Nicht dein Zug!'
+      });
+    }
+
+    // Validate placement (read-only check)
+    const validationResult = isValidPlacement(game.board, placements, game.isFirstMove);
+    if (!validationResult.valid) {
+      return socket.emit('preview_result', {
+        valid: false,
+        error: validationResult.error
+      });
+    }
+
+    // Get formed words
+    const formedWords = getFormedWords(game.board, placements);
+    if (formedWords.length === 0) {
+      return socket.emit('preview_result', {
+        valid: false,
+        error: 'Kein gültiges Wort gebildet.'
+      });
+    }
+
+    // Convert tiles to word strings
+    const wordStrings = formedWords.map(w => w.map(t => t.letter === '*' ? (t.chosenLetter || '?') : t.letter).join(''));
+
+    // Validate words against Duden (async)
+    const validationResults = await validateWords(wordStrings);
+    const invalidWords = validationResults.filter(r => !r.valid);
+
+    if (invalidWords.length > 0) {
+      return socket.emit('preview_result', {
+        valid: false,
+        error: `Ungültige Wörter: ${invalidWords.map(w => w.word).join(', ')}`
+      });
+    }
+
+    // Calculate score
+    const totalScore = calculateScore(formedWords, placements);
+
+    // Build word details with tile positions
+    const words = formedWords.map((tiles, idx) => ({
+      word: wordStrings[idx],
+      tiles: tiles.map(t => ({ row: t.row, col: t.col })),
+      score: validationResults[idx]?.score || 0
+    }));
+
+    socket.emit('preview_result', {
+      valid: true,
+      words,
+      totalScore
+    });
+  });
+
+  // ─── Leave Game ───
+  socket.on('leave_game', (gameId) => {
+    if (!currentUser) return;
+    const game = games[gameId];
+    if (!game) return socket.emit('error_msg', 'Spiel nicht gefunden.');
+    if (!game.players.includes(currentUser)) return;
+
+    // Return player's tiles to bag
+    const playerState = game.playerStates[currentUser];
+    if (playerState && playerState.hand) {
+      game.bag.push(...playerState.hand);
+      // Shuffle bag
+      for (let i = game.bag.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [game.bag[i], game.bag[j]] = [game.bag[j], game.bag[i]];
+      }
+    }
+
+    // Adjust currentPlayerIndex before removing player
+    const leavingIndex = game.players.indexOf(currentUser);
+    const wasCurrentPlayer = game.currentPlayerIndex === leavingIndex;
+
+    // Remove player
+    game.players = game.players.filter(p => p !== currentUser);
+    delete game.playerStates[currentUser];
+    delete playerGames[currentUser];
+    socket.leave(`game_${gameId}`);
+
+    game.moveHistory.push({
+      player: currentUser,
+      action: 'left',
+      timestamp: Date.now()
+    });
+
+    // If no players left, delete the game
+    if (game.players.length === 0) {
+      delete games[gameId];
+      console.log(`[Game] Game ${gameId} deleted — all players left.`);
+      return;
+    }
+
+    // If only 1 player left, end the game (they win by default)
+    if (game.players.length === 1) {
+      game.gameOver = true;
+      game.winner = game.players[0];
+
+      const users = loadUsers();
+      for (const p of game.players) {
+        const u = users[p.toLowerCase()];
+        if (u) {
+          u.stats.gamesPlayed++;
+          u.stats.totalScore += game.playerStates[p].score;
+          u.stats.wins++;
+        }
+      }
+      saveUsers(users);
+
+      delete playerGames[game.players[0]];
+      broadcastGameState(game);
+      return;
+    }
+
+    // Fix currentPlayerIndex
+    if (wasCurrentPlayer) {
+      game.currentPlayerIndex = leavingIndex % game.players.length;
+    } else if (leavingIndex < game.currentPlayerIndex) {
+      game.currentPlayerIndex--;
+    }
+    // Ensure index is in bounds
+    game.currentPlayerIndex = game.currentPlayerIndex % game.players.length;
+
+    broadcastGameState(game);
+  });
+
+  // ─── Game Rejoin (New) ───
+  socket.on('rejoin_game', (gameId) => {
+    if (!currentUser) return;
+    const game = games[gameId];
+
+    if (!game) {
+      return socket.emit('error_msg', 'Spiel nicht gefunden.');
+    }
+
+    if (!game.players.includes(currentUser)) {
+      return socket.emit('error_msg', 'Du bist nicht Teil dieses Spiels.');
+    }
+
+    if (game.gameOver) {
+      return socket.emit('error_msg', 'Dieses Spiel ist bereits beendet.');
+    }
+
+    socket.join(`game_${gameId}`);
+    playerGames[currentUser] = gameId;
+    socket.emit('game_rejoin', getPlayerView(game, currentUser));
+  });
+
   socket.on('disconnect', () => {
     if (currentUser) {
       delete playerSockets[currentUser];
@@ -507,6 +790,7 @@ io.on('connection', (socket) => {
         }
       }
       broadcastLobbies();
+      // Note: Do NOT remove player from game - only clean up socket reference
     }
   });
 
@@ -555,6 +839,11 @@ function endGame(game, finisher) {
     }
   }
   saveUsers(users);
+
+  // Clean up playerGames map
+  for (const p of game.players) {
+    delete playerGames[p];
+  }
 }
 
 function getPlayerView(game, username) {
