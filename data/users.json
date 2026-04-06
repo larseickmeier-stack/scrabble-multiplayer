@@ -1,0 +1,15 @@
+{
+  "laguei": {
+    "username": "Laguei",
+    "passwordHash": "$2a$10$nU64HOcsu3f/qNc6wilU8./omRwmuZjHZJnZLhO2pI5h7GVN0NmV2",
+    "created": "2026-04-06T18:12:16.346Z",
+    "role": "admin",
+    "banned": false,
+    "stats": {
+      "wins": 0,
+      "losses": 0,
+      "totalScore": 0,
+      "gamesPlayed": 0
+    }
+  }
+}
