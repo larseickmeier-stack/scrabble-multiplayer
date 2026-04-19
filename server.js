@@ -38,12 +38,15 @@ function loadUsers() {
 
 function saveUsers(users) {
   fs.writeFileSync(USERS_FILE, JSON.stringify(users, null, 2));
+  console.log(`[Users] Saved ${Object.keys(users).length} users locally.`);
 
   // Async push to GitHub if token is available
   if (GITHUB_TOKEN) {
     pushUsersToGitHub(users).catch(err => {
       console.error('Failed to sync users to GitHub:', err.message);
     });
+  } else {
+    console.warn('[Users] No GITHUB_TOKEN set — users will NOT survive redeployment!');
   }
 }
 
@@ -108,9 +111,13 @@ async function pushUsersToGitHub(users) {
     const content = Buffer.from(JSON.stringify(users, null, 2)).toString('base64');
     const body = {
       message: `Update users.json - ${new Date().toISOString()}`,
-      content,
-      sha: userFileSha
+      content
     };
+
+    // Only include sha if we have one (file already exists)
+    if (userFileSha) {
+      body.sha = userFileSha;
+    }
 
     const response = await makeGitHubRequest(
       'PUT',
@@ -120,6 +127,25 @@ async function pushUsersToGitHub(users) {
 
     if (response.status === 200 || response.status === 201) {
       userFileSha = response.data.content?.sha;
+      console.log('[GitHub] Users synced successfully, new SHA:', userFileSha);
+    } else if (response.status === 409) {
+      // SHA conflict — re-fetch current SHA and retry once
+      console.log('[GitHub] SHA conflict, re-fetching...');
+      await loadUsersFromGitHub(); // updates userFileSha
+      body.sha = userFileSha;
+      const retry = await makeGitHubRequest(
+        'PUT',
+        `/repos/${GITHUB_REPO}/contents/data/users.json`,
+        body
+      );
+      if (retry.status === 200 || retry.status === 201) {
+        userFileSha = retry.data.content?.sha;
+        console.log('[GitHub] Users synced on retry, new SHA:', userFileSha);
+      } else {
+        console.error('[GitHub] Retry failed:', retry.status, JSON.stringify(retry.data).slice(0, 200));
+      }
+    } else {
+      console.error('[GitHub] Push failed:', response.status, JSON.stringify(response.data).slice(0, 200));
     }
   } catch (err) {
     console.error('Failed to push users to GitHub:', err.message);
@@ -127,14 +153,19 @@ async function pushUsersToGitHub(users) {
 }
 
 // ─── Server Startup: Load Users ───
+let usersReady = false;
+
 async function initializeUsers() {
+  console.log('[Startup] Loading users from GitHub...');
   const gitHubUsers = await loadUsersFromGitHub();
   if (gitHubUsers) {
     fs.writeFileSync(USERS_FILE, JSON.stringify(gitHubUsers, null, 2));
+    console.log(`[Startup] Loaded ${Object.keys(gitHubUsers).length} users from GitHub.`);
+  } else {
+    console.log('[Startup] No users found on GitHub, starting fresh or using local file.');
   }
+  usersReady = true;
 }
-
-initializeUsers();
 
 // ─── Auth Routes ───
 app.post('/api/register', async (req, res) => {
@@ -878,6 +909,15 @@ function broadcastLobbies() {
 }
 
 const PORT = process.env.PORT || 3000;
-server.listen(PORT, () => {
-  console.log(`🎮 Scrabble Server läuft auf http://localhost:${PORT}`);
+
+initializeUsers().then(() => {
+  server.listen(PORT, () => {
+    console.log(`🎮 Scrabble Server läuft auf http://localhost:${PORT}`);
+  });
+}).catch(err => {
+  console.error('Failed to initialize:', err);
+  // Start server anyway with local data
+  server.listen(PORT, () => {
+    console.log(`🎮 Scrabble Server läuft auf http://localhost:${PORT} (ohne GitHub-Sync)`);
+  });
 });
